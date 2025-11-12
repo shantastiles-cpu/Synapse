@@ -6,7 +6,7 @@ This project was built for Texas A&M University as a way to help students quickl
 <img width="1005" height="815" alt="image" src="https://github.com/user-attachments/assets/586080a7-35c8-4ffe-a99b-4d6ef8d1b741" />
 ---
 
-## 🚀 Overview
+## 📖 Overview
 
 SeatSync combines hardware, software, and UI design into one seamless system:
 
@@ -23,7 +23,7 @@ Students can:
 
 ---
 
-## 🧱 System Architecture
+## System Architecture
 
 
 ### Hardware (ESP32)
@@ -53,25 +53,25 @@ Supports multiple devices and scalable infrastructure.
 
 ## 📍 Key Features
 
-### 🔴 Real-Time Occupancy
+###  Real-Time Occupancy
 - Map markers turn **green** (open) or **red** (occupied)
 - White border improves contrast and visibility
 
-### 🗺 Interactive Campus Map
+### Interactive Campus Map
 - West/East campus toggle
 - Zoom, drag, pan with `InteractiveViewer`
 - Tap locations to see room details
 
-### 🏢 Zachry Floor Plans
+### Zachry Floor Plans
 - Multi-level floor plan viewer
 - Tap the Zach marker → “View Floor Plans”
 
-### 🧪 Calibration Mode
+### Calibration Mode
 - Tap anywhere on the map
 - App outputs normalized coordinates for new study spots
 - Helps teams quickly add new seats without guesswork
 
-### 👋 Onboarding Tutorial
+### Onboarding Tutorial
 - Automatic pop-up the first time the page loads
 - Help icon in AppBar to re-open anytime
 - Guides users through:
@@ -81,7 +81,7 @@ Supports multiple devices and scalable infrastructure.
   - backend connection  
   - calibration mode  
 
-### ♿ Accessibility Friendly
+### Accessibility Friendly
 - Global text scaling via `TextScaler`
 - High-contrast dots with white borders
 - Large touch targets
@@ -90,7 +90,7 @@ Supports multiple devices and scalable infrastructure.
 
 ---
 
-## 🛠 Tech Stack
+## Tech Stack
 
 | Component | Technology |
 |----------|------------|
