@@ -25,3 +25,34 @@ While the ESP32 has been powered by USB-C to Micro-USB from a computer, it needs
 
 ![seatsensor](https://github.com/user-attachments/assets/36641bdf-b409-4fa1-bcb0-c9d4923cb60e)
 
+//Update 2, 11-12-25
+
+//Firmware
+
+The script was updated to send data every minute from the ESP32 to the server, with readings being taken locally every 5 seconds.
+
+//Hardware
+
+A housing for the prototype was built out of cardboard, with the power bank attached.
+Power bank link: https://a.co/d/3nFqpsB
+
+![IMG_7251](https://github.com/user-attachments/assets/ea34489f-bdde-4b30-bdb1-c312fb37480d)
+
+
+The power bank was placed on the bottom of the box, with a piece of cardboard separating the ESP32 and the PIR sensor from the conductive housing of the power bank. 
+A hole was cut into the box to accommodate the fresnel lens of the PIR sensor.
+The power bank can supply power through a micro USB and has a 10,000 mAh capacity, which should provide ample power to the microcontroller.
+
+![IMG_7250](https://github.com/user-attachments/assets/8d3ac046-78b5-4823-8264-8643b9c049de)
+
+
+Picture below is the prototype sending sensor data via a JSON payload
+
+![IMG_7257](https://github.com/user-attachments/assets/10aaa512-6b80-4b2f-b73f-626398d527bd)
+
+
+
+
+
+
+
