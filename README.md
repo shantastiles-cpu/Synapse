@@ -26,7 +26,7 @@ Students can:
 ## System Architecture
 
 
-### Hardware (ESP32)
+### Hardware (ESP32 and Passive Infrared Sensor)
 - Sends periodic or event-based updates (`motionDetected`)
 - Hits backend via `POST /api/sensor`
 - Each device is registered using:
