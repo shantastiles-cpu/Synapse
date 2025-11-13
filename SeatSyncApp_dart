@@ -134,7 +134,7 @@ class SensorReading {
 
 
 class BackendApi {
-  final String base; // e.g. 'https://capitularly-tariffless-alaysia.ngrok-free.dev'
+  final String base;
 
   BackendApi(this.base);
 
@@ -145,7 +145,9 @@ class BackendApi {
     final res = await http.get(
       uri,
       headers: {
-        'Accept': 'application/json',          // <-- ask explicitly for JSON
+        'Accept': 'application/json',
+        'ngrok-skip-browser-warning': '69420',  // Bypass ngrok's browser warning
+        'User-Agent': 'StudySpotsApp',
       },
     ).timeout(const Duration(seconds: 6));
 
@@ -158,10 +160,10 @@ class BackendApi {
       throw Exception('latest failed: ${res.statusCode}');
     }
 
-    // If server sends HTML again, bail out gracefully
+    // Check if still getting HTML
     final trimmed = body.trimLeft();
     if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
-      debugPrint('Response is HTML, not JSON – check your API URL / auth / cookies.');
+      debugPrint('❌ Still getting HTML - ngrok warning not bypassed');
       return const [];
     }
 
@@ -176,8 +178,6 @@ class BackendApi {
     }
   }
 
-
-
   Stream<List<SensorReading>> streamLatestAll({Duration interval = const Duration(seconds: 3)}) async* {
     while (true) {
       try {
@@ -191,13 +191,20 @@ class BackendApi {
     }
   }
 
-
-  // Optional convenience if you need to register from the app (usually a setup tool does this)
   Future<void> registerDevice({required String deviceId, String? nickname}) async {
     final uri = Uri.parse('$base/api/sensor/register');
-    final res = await http.post(uri,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'deviceID': deviceId, if (nickname != null) 'name': nickname}));
+    final res = await http.post(
+      uri,
+      headers: {
+        'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': '69420',
+        'User-Agent': 'StudySpotsApp',
+      },
+      body: jsonEncode({
+        'deviceID': deviceId,
+        if (nickname != null) 'name': nickname
+      }),
+    );
     if (res.statusCode >= 300) {
       throw Exception('register failed: ${res.statusCode} ${res.body}');
     }
@@ -469,40 +476,44 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _startBackendStream() {
-    // TEMP: fake one reading from DeviceID 1
-    final fakeReading = SensorReading(
-      deviceId: '1',
-      motionDetected: true,
-      timestamp: DateTime.now(),
-    );
+    // Cancel any existing subscription first
+    _backendSub?.cancel();
 
-    final readings = [fakeReading];
+    // Start streaming from the backend
+    _backendSub = _api.streamLatestAll().listen((readings) {
+      // Debug print so you can see what the app is getting
+      debugPrint('Got readings: ${readings.map((r) => {
+        'id': r.deviceId,
+        'motion': r.motionDetected,
+        'time': r.timestamp.toIso8601String(),
+      }).toList()}');
 
-    final map = <String, bool>{
-      for (final r in readings) r.deviceId: r.motionDetected,
-    };
+      // Build a lookup: deviceId -> motionDetected
+      final map = <String, bool>{
+        for (final r in readings) r.deviceId: r.motionDetected,
+      };
 
-    bool apply(List<StudySpace> list) {
-      var changed = false;
-      for (final s in list) {
-        if (s.deviceId != null && map.containsKey(s.deviceId)) {
-          final newOcc = map[s.deviceId]!;
-          if (s.occupied != newOcc) {
-            s.occupied = newOcc;
-            changed = true;
+      bool apply(List<StudySpace> list) {
+        var changed = false;
+        for (final s in list) {
+          if (s.deviceId != null && map.containsKey(s.deviceId)) {
+            final newOcc = map[s.deviceId]!;
+            if (s.occupied != newOcc) {
+              s.occupied = newOcc;
+              changed = true;
+            }
           }
         }
+        return changed;
       }
-      return changed;
-    }
 
-    final changed = apply(westSpaces) | apply(eastSpaces);
-    if (changed) setState(() {});
-
-    // COMMENT OUT the real streaming while you test:
-    // _backendSub?.cancel();
-    // _backendSub = _api.streamLatestAll().listen(...);
+      final changed = apply(westSpaces) | apply(eastSpaces);
+      if (changed) {
+        setState(() {});
+      }
+    });
   }
+
 
 
 
