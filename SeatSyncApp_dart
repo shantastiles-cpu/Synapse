@@ -1,0 +1,1206 @@
+// # -----------------------------
+// # lib/main.dart
+// # -----------------------------
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:flutter/services.dart'; // for Clipboard
+
+
+void main() {
+  runApp(const StudySpotsApp());
+}
+
+class StudySpotsApp extends StatelessWidget {
+  const StudySpotsApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Campus Study Spots',
+      theme: ThemeData(
+        colorSchemeSeed: const Color.fromARGB(255, 91, 0, 0),
+        useMaterial3: true,
+      ),
+      builder: (context, child) {
+        // Increase ALL text app-wide
+        return MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            textScaler: const TextScaler.linear(1.3),
+          ),
+          child: child!,
+        );
+      },
+      home: const WelcomePage(), // or HomePage if you skip
+    );
+  }
+}
+
+
+// --------- Data Model ---------
+class StudySpace {
+  final String id;
+  final String name;
+  final Offset position; // normalized 0..1 inside map
+  final String? deviceId;
+  bool occupied; // mutable for simplicity in demo
+
+  StudySpace({
+    required this.id,
+    required this.name,
+    required this.position,
+    required this.occupied,
+    this.deviceId,
+  });
+}
+
+class BuildingFloors {
+  final String buildingId;       // matches the StudySpace.id for that building
+  final String buildingName;
+  final List<String> floorImageAssets; // asset paths in display order
+
+  BuildingFloors({
+    required this.buildingId,
+    required this.buildingName,
+    required this.floorImageAssets,
+  });
+}
+
+class FloorSpot {
+  final String id;
+  final String name;
+  final int floorIndex;  // 0 = Level 1, 1 = Level 2, 2 = Level 3, etc.
+  final Offset position; // normalized 0..1 within the floor image
+
+  const FloorSpot({
+    required this.id,
+    required this.name,
+    required this.floorIndex,
+    required this.position,
+  });
+}
+
+
+
+class SensorReading {
+  final String deviceId;
+  final bool motionDetected;
+  final DateTime timestamp;
+
+  SensorReading({
+    required this.deviceId,
+    required this.motionDetected,
+    required this.timestamp,
+  });
+
+  factory SensorReading.fromJson(Map<String, dynamic> j) {
+    // DeviceID might be an int or string → normalize to String
+    final rawId = j['deviceID'] ?? j['DeviceID'] ?? j['deviceId'] ?? j['id'];
+    final deviceId = rawId.toString();
+
+    // motion can be bool / int / string
+    final rawMotion = j['motionDetected'] ?? j['MotionDetected'];
+    bool motion;
+    if (rawMotion is bool) {
+      motion = rawMotion;
+    } else if (rawMotion is num) {
+      motion = rawMotion != 0;
+    } else if (rawMotion is String) {
+      final m = rawMotion.trim().toLowerCase();
+      motion = (m == 'true' || m == '1' || m == 'occupied' || m == 'yes');
+    } else {
+      motion = false;
+    }
+
+    // timestamp: be forgiving
+    final rawTs = j['timestamp'] ?? j['ReadTime'] ?? j['time'];
+    DateTime ts;
+    if (rawTs is String) {
+      ts = DateTime.tryParse(rawTs) ?? DateTime.now();
+    } else {
+      ts = DateTime.now();
+    }
+
+    return SensorReading(
+      deviceId: deviceId,
+      motionDetected: motion,
+      timestamp: ts,
+    );
+  }
+}
+
+
+class BackendApi {
+  final String base; // e.g. 'https://capitularly-tariffless-alaysia.ngrok-free.dev'
+
+  BackendApi(this.base);
+
+  Future<List<SensorReading>> fetchLatestAll() async {
+    final uri = Uri.parse('$base/api/sensor/latest');
+    debugPrint('>>> Requesting $uri');
+
+    final res = await http.get(
+      uri,
+      headers: {
+        'Accept': 'application/json',          // <-- ask explicitly for JSON
+      },
+    ).timeout(const Duration(seconds: 6));
+
+    debugPrint('<<< Status: ${res.statusCode}');
+    debugPrint('<<< Headers: ${res.headers}');
+    final body = res.body;
+    debugPrint('<<< Body (first 200 chars): ${body.substring(0, body.length.clamp(0, 200))}');
+
+    if (res.statusCode != 200) {
+      throw Exception('latest failed: ${res.statusCode}');
+    }
+
+    // If server sends HTML again, bail out gracefully
+    final trimmed = body.trimLeft();
+    if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
+      debugPrint('Response is HTML, not JSON – check your API URL / auth / cookies.');
+      return const [];
+    }
+
+    final data = jsonDecode(body);
+
+    if (data is List) {
+      return data.whereType<Map<String, dynamic>>().map(SensorReading.fromJson).toList();
+    } else if (data is Map<String, dynamic>) {
+      return [SensorReading.fromJson(data)];
+    } else {
+      return const [];
+    }
+  }
+
+
+
+  Stream<List<SensorReading>> streamLatestAll({Duration interval = const Duration(seconds: 3)}) async* {
+    while (true) {
+      try {
+        final readings = await fetchLatestAll();
+        yield readings;
+      } catch (e, st) {
+        debugPrint('streamLatestAll error: $e');
+        debugPrint('$st');
+      }
+      await Future.delayed(interval);
+    }
+  }
+
+
+  // Optional convenience if you need to register from the app (usually a setup tool does this)
+  Future<void> registerDevice({required String deviceId, String? nickname}) async {
+    final uri = Uri.parse('$base/api/sensor/register');
+    final res = await http.post(uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'deviceID': deviceId, if (nickname != null) 'name': nickname}));
+    if (res.statusCode >= 300) {
+      throw Exception('register failed: ${res.statusCode} ${res.body}');
+    }
+  }
+}
+
+
+// --------- Live Data Sources ---------
+abstract class LiveDataSource {
+  Stream<bool> statusStream(); // true = occupied, false = free
+  void dispose() {}
+}
+
+/// Manual/mock toggling from UI
+class MockSource extends LiveDataSource {
+  final _controller = StreamController<bool>.broadcast();
+  bool _current = false;
+
+  @override
+  Stream<bool> statusStream() => _controller.stream;
+
+  void toggle() {
+    _current = !_current;
+    _controller.add(_current);
+  }
+
+  @override
+  void dispose() {
+    _controller.close();
+  }
+}
+
+/// Poll a simple HTTP endpoint that returns {"occupied": true/false}
+class HttpPollingSource extends LiveDataSource {
+  final Uri url;
+  final Duration interval;
+  Timer? _timer;
+  final _controller = StreamController<bool>.broadcast();
+
+  HttpPollingSource(this.url, {this.interval = const Duration(seconds: 2)}) {
+    // start immediately
+    _tick();
+    _timer = Timer.periodic(interval, (_) => _tick());
+  }
+
+  Future<void> _tick() async {
+    try {
+      final res = await http.get(url).timeout(const Duration(seconds: 3));
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body);
+        bool _extractOccupied(dynamic body) {
+          if (body is Map) {
+            if (body['occupied'] is bool) return body['occupied'] as bool;
+            if (body['motionDetected'] is bool) return body['motionDetected'] as bool; // <--- NEW
+          }
+          if (body is List && body.isNotEmpty && body.first is Map) {
+            final first = body.first as Map;
+            if (first['motionDetected'] is bool) return first['motionDetected'] as bool; // <--- NEW
+          }
+          return false;
+        }
+        _controller.add(_extractOccupied(body));
+      }
+    } catch (_) {
+      // Network error: ignore for demo
+    }
+  }
+
+  @override
+  Stream<bool> statusStream() => _controller.stream;
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _controller.close();
+  }
+}
+
+/// Subscribe to an MQTT-like topic over WebSocket that sends
+/// plain messages: "occupied" or "free" (or JSON with {occupied: bool})
+class WebSocketSource extends LiveDataSource {
+  final WebSocketChannel channel;
+  final _controller = StreamController<bool>.broadcast();
+  late final StreamSubscription _sub;
+
+  WebSocketSource(String wsUrl)
+      : channel = WebSocketChannel.connect(Uri.parse(wsUrl)) {
+    _sub = channel.stream.listen((event) {
+      try {
+        if (event is String) {
+          final msg = event.trim().toLowerCase();
+          if (msg == 'occupied' || msg == '1' || msg == 'true') {
+            _controller.add(true);
+            return;
+          }
+          if (msg == 'free' || msg == '0' || msg == 'false') {
+            _controller.add(false);
+            return;
+          }
+          // try JSON
+          final decoded = jsonDecode(event);
+          if (decoded is Map && decoded['occupied'] is bool) {
+            _controller.add(decoded['occupied'] as bool);
+          }
+        }
+      } catch (_) {
+        // ignore malformed
+      }
+    }, onError: (_) {}, onDone: () {});
+  }
+
+  @override
+  Stream<bool> statusStream() => _controller.stream;
+
+  @override
+  void dispose() {
+    _sub.cancel();
+    channel.sink.close();
+    _controller.close();
+  }
+}
+
+
+class WelcomePage extends StatelessWidget {
+  const WelcomePage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Welcome to SeatSync',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 32,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Live map of open study spots on campus.\n'
+                'Click the button below to get started.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16),
+              ),
+              const SizedBox(height: 32),
+              FilledButton(
+                onPressed: () {
+                  Navigator.of(context).pushReplacement(
+                    MaterialPageRoute(
+                      builder: (_) => const HomePage(),
+                    ),
+                  );
+                },
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 24.0, vertical: 12.0),
+                  child: Text(
+                    'Get Started',
+                    style: TextStyle(fontSize: 18),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
+// --------- Home Page ---------
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+enum SourceKind { mock, http, websocket }
+
+enum CampusSide { west, east }
+
+class _HomePageState extends State<HomePage> {
+  // Demo campus with a single live spot + some static spots
+  late List<StudySpace> westSpaces;
+  late List<StudySpace> eastSpaces;
+  List<StudySpace> get spaces => _side == CampusSide.west ? westSpaces : eastSpaces;
+
+  late final BuildingFloors zachFloors = BuildingFloors(
+    buildingId: 'live-1',
+    buildingName: 'Zachry Engineering Education Complex (ZACH)',
+    floorImageAssets: const [
+      'assets/floorplans/zach_floor_1.png',
+      'assets/floorplans/zach_floor_2.png',
+      'assets/floorplans/zach_floor_3.png',
+      'assets/floorplans/zach_floor_4.png',
+      'assets/floorplans/zach_floor_5.png',
+    ],
+  );
+
+  final List<FloorSpot> _zachFloorSpots = const [
+    FloorSpot(
+      id: 'zach-332',
+      name: 'Room 332 – Study Nook',
+      floorIndex: 2, // Level 3 (0-based: 0,1,2,...)
+      position: Offset(0.565, 0.647), // <-- placeholder; tweak w/ coords
+    ),
+    // Add more rooms here
+  ];
+
+
+  bool _calibrate = false;
+  Offset? _lastTapNorm; // last tap in normalized coords (0..1)
+
+
+  SourceKind _kind = SourceKind.mock;
+  LiveDataSource? _source;
+  CampusSide _side = CampusSide.west;
+
+  late BackendApi _api;
+  StreamSubscription<List<SensorReading>>? _backendSub;
+  final TextEditingController _backendUrlController = TextEditingController(
+    text: 'https://capitularly-tariffless-alaysia.ngrok-free.dev', // teammate’s base URL
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    westSpaces = [
+      StudySpace(id: 'wccc-1', name: 'White Creek Community Center', position: const Offset(0.705, 0.412), occupied: false),
+    ];
+    eastSpaces = [
+      StudySpace(id: 'live-1', 
+                name: 'Zachry Study Areas', 
+                position: const Offset(0.439, 0.354), 
+                occupied: false,
+                deviceId: '1'
+                ),
+      StudySpace(id: 'lib-2', 
+                name: 'Evans Library 3rd Floor', 
+                position: const Offset(0.363, 0.491), 
+                occupied: true,
+                // no deviceId => remains static/manual for now
+                ),
+    ];
+    _attachSource();
+
+    _api = BackendApi(_backendUrlController.text);
+    _startBackendStream();    // <-- start listening
+    _attachSource();          // existing
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _showTutorial();
+    });
+  }
+
+  @override
+  void dispose() {
+    _source?.dispose();
+    super.dispose();
+    _backendSub?.cancel();
+    _backendUrlController.dispose();
+  }
+
+  void _startBackendStream() {
+    // TEMP: fake one reading from DeviceID 1
+    final fakeReading = SensorReading(
+      deviceId: '1',
+      motionDetected: true,
+      timestamp: DateTime.now(),
+    );
+
+    final readings = [fakeReading];
+
+    final map = <String, bool>{
+      for (final r in readings) r.deviceId: r.motionDetected,
+    };
+
+    bool apply(List<StudySpace> list) {
+      var changed = false;
+      for (final s in list) {
+        if (s.deviceId != null && map.containsKey(s.deviceId)) {
+          final newOcc = map[s.deviceId]!;
+          if (s.occupied != newOcc) {
+            s.occupied = newOcc;
+            changed = true;
+          }
+        }
+      }
+      return changed;
+    }
+
+    final changed = apply(westSpaces) | apply(eastSpaces);
+    if (changed) setState(() {});
+
+    // COMMENT OUT the real streaming while you test:
+    // _backendSub?.cancel();
+    // _backendSub = _api.streamLatestAll().listen(...);
+  }
+
+
+
+  void _attachSource() {
+    _source?.dispose();
+
+    switch (_kind) {
+      case SourceKind.mock:
+        final mock = MockSource();
+        _source = mock;
+        mock.statusStream().listen((occ) => _updateLive(occ));
+        break;
+      case SourceKind.http:
+        // Live mode: we rely on the Backend (Node API) stream,
+        // so no separate LiveDataSource is needed here.
+        _source = null;
+        break;
+      case SourceKind.websocket:
+        // Not used in current UI, keep null.
+        _source = null;
+        break;
+    }
+
+    setState(() {});
+  }
+
+
+  void _updateLive(bool occupied) {
+    void updateIn(List<StudySpace> list) {
+      // Find some spot that is NOT tied to a real sensor (deviceId == null)
+      final idx = list.indexWhere((s) => s.deviceId == null);
+      if (idx != -1) {
+        list[idx].occupied = occupied;
+      }
+    }
+
+    setState(() {
+      updateIn(westSpaces);
+      updateIn(eastSpaces);
+    });
+  }
+
+
+  void _onTapSpace(StudySpace s) {
+    final hasFloors = s.id == zachFloors.buildingId;
+    showDialog(
+      context: context,
+      builder: (context) {
+        return _BuildingDialog(
+          title: s.name,
+          occupied: s.occupied,
+          hasFloorPlans: hasFloors,
+          onViewFloorPlans: hasFloors
+              ? () {
+                  Navigator.of(context).pop();
+                  Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => FloorPlanViewer(
+                      title: zachFloors.buildingName,
+                      floors: zachFloors.floorImageAssets,
+                      spots: _zachFloorSpots,
+                    ),
+                  ));
+                }
+              : null,
+        );
+      },
+    );
+  }
+
+  void _showTutorial() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Welcome to SeatSync'),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: const [
+                _TutorialRow(
+                  icon: Icons.map,
+                  text: 'Use the West / East buttons to switch which side of campus you see.',
+                ),
+                SizedBox(height: 8),
+                _TutorialRow(
+                  icon: Icons.circle,
+                  text: 'Tap a colored dot to see details about that study spot.',
+                ),
+                SizedBox(height: 8),
+                _TutorialRow(
+                  icon: Icons.apartment,
+                  text: 'Tap the Zachry spot, then "View Floor Plans" to see each level.',
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Got it'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+
+
+  @override
+  Widget build(BuildContext context) {
+    final mock = _source is MockSource ? _source as MockSource : null;
+
+    final screenWidth = MediaQuery.of(context).size.width;
+    final leftWidth = screenWidth * 0.20; // 10% of screen, tweak as needed
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Campus Study Spots'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.help_outline),
+            tooltip: 'How to use SeatSync',
+            onPressed: _showTutorial, // <-- we'll define this below
+          ),
+        ],
+      ),
+      body: Row(
+        children: [
+          // Sidebar list
+          SizedBox(
+            width: leftWidth,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(12.0),
+                  child: _buildSourceControls(mock),
+                ),
+                const Divider(height: 1),
+                Expanded(
+                  child: ListView.separated(
+                    itemCount: spaces.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (context, i) {
+                      final s = spaces[i];
+                      final isLive = s.id == 'live-1';
+                      return ListTile(
+                        leading: Icon(Icons.circle, color: s.occupied ? Colors.red : const Color.fromARGB(255, 12, 255, 4)),
+                        title: Text(s.name),
+                        subtitle: Text(isLive ? 'Live (MCU demo)' : 'Manual entry'),
+                        trailing: Text(s.occupied ? 'Occupied' : 'Open', style: TextStyle(color: s.occupied ? Colors.red : Colors.green)),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const VerticalDivider(width: 1),
+          // Map
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final stack = Stack(
+                  children: [
+                    Positioned.fill(
+                      child: Image.asset(
+                        _side == CampusSide.west ? 'assets/maps/AggieMap2018_west.png' : 'assets/maps/AggieMap2018_east.png',
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                    ...spaces.map((s) {
+                      final dx = s.position.dx * constraints.maxWidth;
+                      final dy = s.position.dy * constraints.maxHeight;
+                      final isLive = s.id == 'live-1';
+                      return Positioned(
+                        left: dx - 14,
+                        top: dy - 14,
+                        child: Tooltip(
+                          message: s.name + (isLive ? ' (Live)' : ''),
+                          child: InkWell(
+                            customBorder: const CircleBorder(),
+                            onTap: () => _onTapSpace(s),
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 250),
+                              width: 28,
+                              height: 28,
+                              decoration: BoxDecoration(
+                                color: s.occupied ? Colors.red : Colors.green,
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: Colors.white,
+                                  width: 4,          // tweak this thickness
+                                ),
+                                boxShadow: const [
+                                  BoxShadow(
+                                    blurRadius: 6,
+                                    spreadRadius: 1,
+                                    offset: Offset(0, 2),
+                                    color: Colors.black12,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    }),
+                    Positioned(
+                      right: 16,
+                      bottom: 16,
+                      child: _LegendCard(),
+                    )
+                  ],
+                );
+                final mapSize = Size(constraints.maxWidth, constraints.maxHeight);
+
+                return Listener(
+                  behavior: HitTestBehavior.translucent, // don't block child taps
+                  onPointerDown: (event) {
+                    if (!_calibrate) return;
+                    final local = event.localPosition;
+                    final nx = (local.dx / mapSize.width).clamp(0.0, 1.0);
+                    final ny = (local.dy / mapSize.height).clamp(0.0, 1.0);
+                    final norm = Offset(nx, ny);
+
+                    setState(() => _lastTapNorm = norm);
+
+                    final code =
+                        'position: const Offset(${nx.toStringAsFixed(3)}, ${ny.toStringAsFixed(3)})';
+                    Clipboard.setData(ClipboardData(text: code));
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Copied → $code')));
+                  },
+                  child: InteractiveViewer(
+                    maxScale: 5,
+                    minScale: 0.5,
+                    child: stack,
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: const _FooterBar(),
+      floatingActionButton: mock == null
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: mock.toggle,
+              icon: const Icon(Icons.power_settings_new),
+              label: const Text('Toggle Live Spot'),
+            ),
+    );
+  }
+
+  Widget _buildSourceControls(MockSource? mock) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Campus Map', style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        SwitchListTile(
+          title: const Text('Calibration mode'),
+          subtitle: const Text('Tap the map to get normalized coords'),
+          value: _calibrate,
+          onChanged: (v) => setState(() => _calibrate = v),
+        ),
+        const SizedBox(height: 8),
+        SegmentedButton<CampusSide>(
+          segments: const [
+            ButtonSegment(value: CampusSide.west, label: Text('West')),
+            ButtonSegment(value: CampusSide.east, label: Text('East')),
+          ],
+          selected: {_side},
+          onSelectionChanged: (set) => setState(() => _side = set.first),
+        ),
+        const SizedBox(height: 16),
+
+        const Text('Live Data Source', style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        SegmentedButton<SourceKind>(
+          segments: const [
+            ButtonSegment(value: SourceKind.mock, label: Text('Test')),
+            ButtonSegment(value: SourceKind.http, label: Text('Live')),
+          ],
+          selected: {_kind},
+          onSelectionChanged: (set) {
+            setState(() {
+              _kind = set.first;
+            });
+            _attachSource();
+          },
+        ),
+        const SizedBox(height: 12),
+
+        // When in Test mode → show mock instructions
+        if (_kind == SourceKind.mock) ...[
+          Text(
+            'Test mode: use the Toggle Live Spot button to simulate a sensor changing state.',
+            style: TextStyle(color: Colors.grey[700]),
+          ),
+        ]
+
+        // When in Live mode → show Backend (Node API) section
+        else ...[
+          const SizedBox(height: 16),
+          const Text('Backend (Node API)', style: TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _backendUrlController,
+            decoration: const InputDecoration(
+              labelText: 'API base URL',
+              hintText: 'https://your-api.onrender.com',
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (_) {
+              _api = BackendApi(_backendUrlController.text);
+              _startBackendStream();
+            },
+          ),
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: () {
+              _api = BackendApi(_backendUrlController.text);
+              _startBackendStream();
+            },
+            icon: const Icon(Icons.cloud_sync),
+            label: const Text('Connect Backend'),
+          ),
+          const SizedBox(height: 12),
+          const Text('Admin: register a device'),
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: () async {
+              try {
+                await _api.registerDevice(
+                  deviceId: 'device-001',
+                  nickname: 'ZACH Study Area',
+                );
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Device registered')),
+                );
+              } catch (e) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Register failed: $e')),
+                );
+              }
+            },
+            icon: const Icon(Icons.add_link),
+            label: const Text('Register New Device'),
+          ),
+        ],
+      ],
+    );
+  }
+
+}
+
+class _BuildingDialog extends StatelessWidget {
+  final String title;
+  final bool occupied;
+  final bool hasFloorPlans;
+  final VoidCallback? onViewFloorPlans;
+  const _BuildingDialog({
+    required this.title,
+    required this.occupied,
+    required this.hasFloorPlans,
+    this.onViewFloorPlans,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(title),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: Icon(Icons.meeting_room, color: occupied ? Colors.red : Colors.green),
+            title: const Text('Room 332 – Study Nook'),
+            subtitle: Text(occupied ? 'Occupied' : 'Open'),
+            trailing: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: occupied ? Colors.red.withOpacity(0.1) : Colors.green.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(occupied ? 'Busy' : 'Available',
+                  style: TextStyle(color: occupied ? Colors.red : Colors.green)),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        if (hasFloorPlans)
+          TextButton.icon(
+            onPressed: onViewFloorPlans,
+            icon: const Icon(Icons.apartment),
+            label: const Text('View Floor Plans'),
+          ),
+        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Close')),
+      ],
+    );
+  }
+}
+
+class FloorPlanViewer extends StatefulWidget {
+  final String title;
+  final List<String> floors;
+  final List<FloorSpot> spots; 
+
+  const FloorPlanViewer({
+    super.key,
+    required this.title,
+    required this.floors,
+    this.spots = const [],       // default empty
+  });
+
+  @override
+  State<FloorPlanViewer> createState() => _FloorPlanViewerState();
+}
+
+
+class _FloorPlanViewerState extends State<FloorPlanViewer> {
+  int _index = 0;
+  bool _calibrate =  false;
+
+  @override
+  Widget build(BuildContext context) {
+    final floorLabels = List.generate(widget.floors.length, (i) => 'Level ${i + 1}');
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.title),
+        actions: [
+          Row(
+            children: [
+              const Text('Calibrate', style: TextStyle(fontSize: 14)),
+              Switch(
+                value: _calibrate,
+                onChanged: (v) => setState(() => _calibrate = v),
+              ),
+            ],
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: SegmentedButton<int>(
+              segments: [
+                for (int i = 0; i < widget.floors.length; i++)
+                  ButtonSegment(value: i, label: Text(floorLabels[i])),
+              ],
+              selected: {_index},
+              onSelectionChanged: (set) => setState(() => _index = set.first),
+            ),
+          ),
+          Expanded(
+            child: _calibrate ? _buildCalibratedFloorView() : _buildNormalFloorView(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCalibratedFloorView() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        final height = constraints.maxHeight;
+
+        // Filter spots for current floor (if you’re showing them)
+        final floorSpots = widget.spots
+            .where((s) => s.floorIndex == _index)
+            .toList();
+
+        return Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (event) {
+            if (!_calibrate) return;
+
+            final local = event.localPosition;
+            final nx = (local.dx / width).clamp(0.0, 1.0);
+            final ny = (local.dy / height).clamp(0.0, 1.0);
+            final code =
+                'FloorSpot(id: "zach-XXX", name: "Room XXX", floorIndex: $_index, position: const Offset(${nx.toStringAsFixed(3)}, ${ny.toStringAsFixed(3)}))';
+
+            Clipboard.setData(ClipboardData(text: code));
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Copied → $code')),
+            );
+          },
+          child: InteractiveViewer(
+            minScale: 0.5,
+            maxScale: 6,
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: Image.asset(
+                    widget.floors[_index],
+                    fit: BoxFit.contain,
+                    filterQuality: FilterQuality.high,
+                  ),
+                ),
+                // Optional: show existing spots
+                ...floorSpots.map((spot) {
+                  final dx = spot.position.dx * width;
+                  final dy = spot.position.dy * height;
+
+                  return Positioned(
+                    left: dx - 12,
+                    top: dy - 12,
+                    child: Tooltip(
+                      message: spot.name,
+                      child: Container(
+                        width: 24,
+                        height: 24,
+                        decoration: BoxDecoration(
+                          color: Colors.green,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 3),
+                          boxShadow: const [
+                            BoxShadow(
+                              blurRadius: 4,
+                              offset: Offset(0, 2),
+                              color: Colors.black26,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildNormalFloorView() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final floorSpots = widget.spots
+            .where((s) => s.floorIndex == _index)
+            .toList();
+
+        final size = Size(constraints.maxWidth, constraints.maxHeight);
+
+        return InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 6,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: Image.asset(
+                  widget.floors[_index],
+                  fit: BoxFit.contain,
+                  filterQuality: FilterQuality.high,
+                ),
+              ),
+              ...floorSpots.map((spot) {
+                final dx = spot.position.dx * size.width;
+                final dy = spot.position.dy * size.height;
+
+                return Positioned(
+                  left: dx - 12,
+                  top: dy - 12,
+                  child: Tooltip(
+                    message: spot.name,
+                    child: Container(
+                      width: 24,
+                      height: 24,
+                      decoration: BoxDecoration(
+                        color: Colors.green,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: Colors.white,
+                          width: 3,
+                        ),
+                        boxShadow: const [
+                          BoxShadow(
+                            blurRadius: 4,
+                            offset: Offset(0, 2),
+                            color: Colors.black26,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+
+class _TutorialRow extends StatelessWidget {
+  final IconData icon;
+  final String text;
+
+  const _TutorialRow({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 20),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            text,
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+
+
+class _LegendCard extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: const [
+            _LegendDot(color: Colors.green, label: 'Open'),
+            SizedBox(width: 12),
+            _LegendDot(color: Colors.red, label: 'Occupied'),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LegendDot extends StatelessWidget {
+  final Color color;
+  final String label;
+  const _LegendDot({required this.color, required this.label});
+  @override
+  Widget build(BuildContext context) {
+    return Row(children: [
+      Icon(Icons.circle, color: color, size: 16),
+      const SizedBox(width: 6),
+      Text(label),
+    ]);
+  }
+}
+
+class _FooterBar extends StatelessWidget {
+  const _FooterBar();
+  @override
+  Widget build(BuildContext context) {
+    return BottomAppBar(
+      height: 46,
+      child: Center(
+        child: Text(
+          'Demo: 1 live MCU-driven spot + static campus spots',
+          style: Theme.of(context).textTheme.labelMedium,
+        ),
+      ),
+    );
+  }
+}
+
+class _GridPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = const Color(0xFFE1E9F5)
+      ..strokeWidth = 1;
+
+    const step = 60.0;
+    for (double x = 0; x <= size.width; x += step) {
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    }
+    for (double y = 0; y <= size.height; y += step) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
