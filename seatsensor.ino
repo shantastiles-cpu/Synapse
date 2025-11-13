@@ -6,10 +6,11 @@ const int pirSensorPin = 32; // Connect PIR OUT to GPIO Pin 32
 
 // Variable to store the motion sensor's state
 int analogState = 0;
+int motionEvents =  0;
+int loops = 0; //Loop variable will help with timing the data transmission
+bool motionState = false;
 
 void setup() {
-  
-  
   
   // Initialize serial communication at 9600 baud rate
   Serial.begin(9600);
@@ -33,35 +34,46 @@ void loop() {
   // Read the value from the PIR sensor in mV
   analogState = analogRead(pirSensorPin);
 
-  // Add a small delay to avoid excessive serial output
-  delay(2000);
-  sendMotionData();//Post to HTTPS
-
-}
-
-void sendMotionData() {
   if (WiFi.status() == WL_CONNECTED) {
-    bool motionState = false; 
+    
     if (analogState > 3000) {
     //If motion is detected (HIGH)
     motionState = true;
     Serial.println("Motion Detected!");
     Serial.println(analogState);
-  } else {
+    motionEvents++;
+  } if (analogState < 3000) {
     motionState = false;
     // If no motion is detected (LOW)
     Serial.println("No Motion Detected");
     Serial.println(analogState);
   }
+  }
+  // Add a small delay to avoid excessive serial output
+  delay(5000);
+  loops++; //Records number of sensor checks the ESP32 has perform before it sends data to the server 
+  if (loops == 12) { //12 loops * 5000ms means that it sends data every 36000ms or 60 seconds
+    //Post to HTTPS
+    loops = 0;
+    if (motionEvents > 1) { //If more than one movement has occured within the last minute, it implies that the study space is occupied.
+      motionState = true;
+    }
+    motionEvents = 0; //Reset the number of motion states for the next minute
+    sendMotionData(motionState); //Send data with the boolean parameter of motion detection
+  }
+
+}
+void sendMotionData(bool motionStateParameter) {
 
   int deviceID = 1; //Define the number of the device
 
+  bool State = motionStateParameter;
   //JSON Payload to Send
   String payload = "{";
   payload += "\"deviceID\": ";
   payload += deviceID;
   payload += ", \"motionDetected\": ";
-  payload += (motionState ? "true" : "false");
+  payload += (State ? "true" : "false"); //Write true or false depending upon the parameter passed in the function
   payload += "}";
 
   
@@ -75,7 +87,7 @@ void sendMotionData() {
   Serial.print("Sending motion data: ");
   Serial.println(payload);
 
-  int httpResponseCode = https.POST(payload);
+  int httpResponseCode = https.POST(payload); //Send JSON Payload to server
 
   //Printing Response
   if (httpResponseCode > 0) {
@@ -83,13 +95,14 @@ void sendMotionData() {
     String response = https.getString();
     Serial.println("Response:");
     Serial.println(response);
-  } else {
+  } 
+  else if (WiFi.status() != WL_CONNECTED) { //Handling WiFi disconnect
+    Serial.println("WiFi disconnected, attempting reconnect...");
+    WiFi.reconnect();
+  }
+  else {
     Serial.printf("Error in POST: %d\n", httpResponseCode); //Outputting exceptions
   }
 
-  https.end();
-} else {
-  Serial.println("WiFi disconnected, attempting reconnect...");
-  WiFi.reconnect();
-}
-}
+  https.end(); //Exit HTTPS client
+} 
