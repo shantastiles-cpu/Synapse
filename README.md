@@ -1,4 +1,4 @@
-# SeatSync by Synapse – Real-Time Study Spot Availability System
+# SeatSync by Synapse – A Real-Time Study Spot Availability System
 
 SeatSync is a cross-platform campus map that shows **live availability of study spaces** using IoT sensors, a cloud API, and a Flutter front-end.  
 This project was built for Texas A&M University as a way to help students quickly find open seating across campus.
