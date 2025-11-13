@@ -102,3 +102,13 @@ Supports multiple devices and scalable infrastructure.
 | Version Control | GitHub |
 
 ---
+
+## Meet the Team
+
+| Name | Role |
+|----------|------------|
+| Shanta Stiles | Software Engineer |
+| Will Edwards | Hardware Engineer |
+| Josh Derayunan | System Integration Engineer |
+
+---
