@@ -3,6 +3,7 @@
 SeatSync is a cross-platform campus map that shows **live availability of study spaces** using IoT sensors, a cloud API, and a Flutter front-end.  
 This project was built for Texas A&M University as a way to help students quickly find open seating across campus.
 
+
 <img width="1005" height="815" alt="image" src="https://github.com/user-attachments/assets/586080a7-35c8-4ffe-a99b-4d6ef8d1b741" />
 ---
 
